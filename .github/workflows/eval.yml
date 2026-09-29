@@ -24,11 +24,11 @@ jobs:
           python-version: "3.12"
       - name: Unit tests
         run: python -X utf8 -m unittest discover -s tests -v
-      - name: Unified blocking gate
+      - name: Unified blocking gate (L08 injected pre-report crash)
         if: ${{ !cancelled() }}
         run: |
           mkdir -p "$REPORT_DIR"
-          python -X utf8 -m eval.harness --suite blocking --report-path "$REPORT_DIR/harness-blocking.json"
+          python -c "raise SystemExit('L08 injected failure before report creation')"
       - name: Bind Evidence Envelope to this run
         if: always()
         run: python -X utf8 -m workbench.ci_evidence --report "$REPORT_DIR/harness-blocking.json" --output "$REPORT_DIR/ci-evidence.json"
