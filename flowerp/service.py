@@ -228,6 +228,7 @@ class ERPService:
 
     def reserve_order(self, order_id: str) -> dict:
         with self.store.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             order = conn.execute("SELECT status FROM sales_orders WHERE id=?", (order_id,)).fetchone()
             if not order:
                 raise NotFound(f"订单不存在：{order_id}")

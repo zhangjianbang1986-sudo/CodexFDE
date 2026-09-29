@@ -177,6 +177,58 @@ class InventoryTests(ProductionFixture):
 
 
 class SalesTests(ProductionFixture):
+    _observed_tables = ("stock_balance", "stock_reservations", "sales_document_lines", "sales_documents")
+
+    def observed_reservation_state(self) -> dict[str, list[dict]]:
+        return {
+            table: self.store.rows(f"SELECT * FROM {table} ORDER BY rowid")
+            for table in self._observed_tables
+        }
+
+    def two_line_order(self, second_stock: int = 5) -> tuple[dict, dict]:
+        second = self.master.create_product(self.admin, "SKU-002", "第二商品", 8000, 4000)
+        self.receive(5)
+        self.inventory.receive(self.admin, second["id"], "LOC-MAIN-STOCK", second_stock, "opening-2", unit_cost_cents=4000)
+        order = self.sales.create_order(self.admin, self.customer["id"], [
+            {"product_id": self.product["id"], "quantity": 2},
+            {"product_id": second["id"], "quantity": 3},
+        ])
+        self.sales.confirm(self.admin, order["id"])
+        return order, second
+
+    def test_multiline_reservation_succeeds_as_one_order(self) -> None:
+        order, second = self.two_line_order()
+        reserved = self.sales.reserve(self.admin, order["id"])
+        self.assertEqual("reserved", reserved["status"])
+        self.assertEqual([2, 3], [line["reserved_quantity"] for line in reserved["lines"]])
+        self.assertEqual(3, self.inventory.balance(self.admin, self.product["id"], "LOC-MAIN-STOCK")["available"])
+        self.assertEqual(2, self.inventory.balance(self.admin, second["id"], "LOC-MAIN-STOCK")["available"])
+
+    def test_multiline_shortage_keeps_all_four_tables_unchanged(self) -> None:
+        order, _second = self.two_line_order(second_stock=2)
+        before = self.observed_reservation_state()
+        with self.assertRaises(InsufficientStock):
+            self.sales.reserve(self.admin, order["id"])
+        self.assertEqual(before, self.observed_reservation_state())
+        self.assertEqual("confirmed", self.sales.order(self.admin, order["id"])["status"])
+
+    def test_second_reservation_write_error_rolls_back_all_four_tables(self) -> None:
+        order, _second = self.two_line_order()
+        with self.store.connect() as conn:
+            conn.executescript("""
+                CREATE TRIGGER l08_fail_second_reservation
+                BEFORE INSERT ON stock_reservations
+                WHEN (SELECT COUNT(*) FROM stock_reservations WHERE reference_id=NEW.reference_id) >= 1
+                BEGIN
+                  SELECT RAISE(ABORT, 'L08 injected second-write failure');
+                END;
+            """)
+        before = self.observed_reservation_state()
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.sales.reserve(self.admin, order["id"])
+        self.assertEqual(before, self.observed_reservation_state())
+        self.assertEqual("confirmed", self.sales.order(self.admin, order["id"])["status"])
+
     def test_order_total_tax_reserve_and_partial_shipment(self) -> None:
         self.receive(20)
         order = self.sales.create_order(self.admin, self.customer["id"],

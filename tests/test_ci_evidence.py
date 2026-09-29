@@ -39,8 +39,10 @@ class CIEvidenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             report = Path(temporary) / "harness-blocking.json"
             report.write_text("{}", encoding="utf-8")
-            with self.assertRaises(SystemExit):
-                build_envelope(report, env={})
+            for env in ({}, {"GITHUB_SHA": "abc"}, {"GITHUB_RUN_ID": "9"},
+                        {"GITHUB_SHA": "  ", "GITHUB_RUN_ID": "9"}):
+                with self.subTest(env=env), self.assertRaises(SystemExit):
+                    build_envelope(report, env=env)
 
 
 if __name__ == "__main__":

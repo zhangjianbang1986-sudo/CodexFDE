@@ -36,6 +36,22 @@ class ERPServiceTests(unittest.TestCase):
         self.service.reserve_order("SO-3"); self.service.cancel_order("SO-3")
         self.assertEqual(5, self.service.product("A")["available"])
 
+    def test_multiline_shortage_leaves_order_stock_and_events_unchanged(self) -> None:
+        self.service.add_product("B", "商品 B", 1000)
+        self.service.receive_stock("B", 1, "opening-b")
+        order = self.service.create_order("C", [OrderLine("A", 2, 2500), OrderLine("B", 2, 1000)], "SO-MULTI")
+        inventory = self.service.inventory()
+        events = self.service.inventory_events()
+        with self.assertRaises(InsufficientStock):
+            self.service.reserve_order(order["id"])
+        self.assertEqual(order, self.service.order(order["id"]))
+        self.assertEqual(inventory, self.service.inventory())
+        self.assertEqual(events, self.service.inventory_events())
+        self.service.receive_stock("B", 1, "replenish-b")
+        self.assertEqual("reserved", self.service.reserve_order(order["id"])["status"])
+        self.assertEqual(2, self.service.product("A")["reserved"])
+        self.assertEqual(2, self.service.product("B")["reserved"])
+
     def test_receipt_is_idempotent(self) -> None:
         self.service.receive_stock("A", 2, "receipt-1"); replay = self.service.receive_stock("A", 2, "receipt-1")
         self.assertTrue(replay["idempotent_replay"]); self.assertEqual(7, replay["on_hand"])

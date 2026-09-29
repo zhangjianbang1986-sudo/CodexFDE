@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 from datetime import date, timedelta
 from pathlib import Path
@@ -100,7 +101,22 @@ def stock_never_negative() -> str:
         else: raise AssertionError("库存不足仍然预占成功")
         stock = service.product("SKU-A")
         assert stock["available"] == 5 and stock["reserved"] == 0
-        return "缺货请求被拒绝，库存未发生部分写入"
+        service.add_product("SKU-B", "多行验收商品", 1000)
+        service.receive_stock("SKU-B", 1, "open-b")
+        multi = service.create_order("客户", [OrderLine("SKU-A", 2, 1000), OrderLine("SKU-B", 2, 1000)], "SO-EVAL-MULTI")
+        before_stock = service.inventory()
+        before_events = service.inventory_events()
+        try: service.reserve_order(multi["id"])
+        except InsufficientStock: pass
+        else: raise AssertionError("多行订单缺货仍然预占成功")
+        assert service.order(multi["id"]) == multi
+        assert service.inventory() == before_stock
+        assert service.inventory_events() == before_events
+        service.receive_stock("SKU-B", 1, "replenish-b")
+        assert service.reserve_order(multi["id"])["status"] == "reserved"
+        assert service.product("SKU-A")["reserved"] == 2
+        assert service.product("SKU-B")["reserved"] == 2
+        return "单行及多行缺货均拒绝，订单/库存/流水不变；补货后整单预占成功"
     finally: tmp.cleanup()
 
 
@@ -495,18 +511,73 @@ def sales_credit_and_atomic_reservation() -> str:
         from flowerp.identity import IdentityService
         IdentityService(store).ensure_local_defaults()
         master = MasterDataService(store); inventory = InventoryService(store); sales = SalesService(store)
-        product = master.create_product(SYSTEM_PRINCIPAL, "EVAL-S", "销售验收商品", 1000, 500)
         customer = master.create_customer(SYSTEM_PRINCIPAL, "EVAL-CUS", "验收客户", credit_limit_cents=100000)
-        inventory.receive(SYSTEM_PRINCIPAL, product["id"], "LOC-MAIN-STOCK", 2, "sales-opening")
-        order = sales.create_order(SYSTEM_PRINCIPAL, customer["id"], [{"product_id": product["id"], "quantity": 3}])
-        sales.confirm(SYSTEM_PRINCIPAL, order["id"])
+
+        def stocked_product(code: str, quantity: int) -> dict:
+            product = master.create_product(SYSTEM_PRINCIPAL, code, f"{code} 验收商品", 1000, 500)
+            inventory.receive(SYSTEM_PRINCIPAL, product["id"], "LOC-MAIN-STOCK", quantity, f"opening:{code}")
+            return product
+
+        def observed_state() -> dict[str, list[dict]]:
+            return {
+                table: store.rows(f"SELECT * FROM {table} ORDER BY rowid")
+                for table in ("stock_balance", "stock_reservations", "sales_document_lines", "sales_documents")
+            }
+
+        success_a = stocked_product("EVAL-S-A", 5)
+        success_b = stocked_product("EVAL-S-B", 5)
+        success = sales.create_order(SYSTEM_PRINCIPAL, customer["id"], [
+            {"product_id": success_a["id"], "quantity": 2},
+            {"product_id": success_b["id"], "quantity": 3},
+        ])
+        sales.confirm(SYSTEM_PRINCIPAL, success["id"])
+        reserved = sales.reserve(SYSTEM_PRINCIPAL, success["id"])
+        assert reserved["status"] == "reserved"
+        assert [line["reserved_quantity"] for line in reserved["lines"]] == [2, 3]
+        assert inventory.balance(SYSTEM_PRINCIPAL, success_a["id"], "LOC-MAIN-STOCK")["available"] == 3
+        assert inventory.balance(SYSTEM_PRINCIPAL, success_b["id"], "LOC-MAIN-STOCK")["available"] == 2
+
+        shortage_a = stocked_product("EVAL-F-A", 5)
+        shortage_b = stocked_product("EVAL-F-B", 2)
+        shortage = sales.create_order(SYSTEM_PRINCIPAL, customer["id"], [
+            {"product_id": shortage_a["id"], "quantity": 2},
+            {"product_id": shortage_b["id"], "quantity": 3},
+        ])
+        sales.confirm(SYSTEM_PRINCIPAL, shortage["id"])
+        before_shortage = observed_state()
         try:
-            sales.reserve(SYSTEM_PRINCIPAL, order["id"])
+            sales.reserve(SYSTEM_PRINCIPAL, shortage["id"])
         except InsufficientStock:
-            balance = inventory.balance(SYSTEM_PRINCIPAL, product["id"], "LOC-MAIN-STOCK")
-            assert balance["reserved"] == 0 and balance["available"] == 2
-            return "正式销售订单缺货时整单回滚，没有部分预占"
-        raise AssertionError("正式销售订单超卖未被阻断")
+            assert observed_state() == before_shortage
+            assert sales.order(SYSTEM_PRINCIPAL, shortage["id"])["status"] == "confirmed"
+        else:
+            raise AssertionError("正式销售订单多行缺货仍然预占成功")
+
+        write_a = stocked_product("EVAL-W-A", 5)
+        write_b = stocked_product("EVAL-W-B", 5)
+        write_error = sales.create_order(SYSTEM_PRINCIPAL, customer["id"], [
+            {"product_id": write_a["id"], "quantity": 2},
+            {"product_id": write_b["id"], "quantity": 3},
+        ])
+        sales.confirm(SYSTEM_PRINCIPAL, write_error["id"])
+        with store.connect() as conn:
+            conn.executescript("""
+                CREATE TRIGGER l08_fail_second_reservation
+                BEFORE INSERT ON stock_reservations
+                WHEN (SELECT COUNT(*) FROM stock_reservations WHERE reference_id=NEW.reference_id) >= 1
+                BEGIN
+                  SELECT RAISE(ABORT, 'L08 injected second-write failure');
+                END;
+            """)
+        before_write_error = observed_state()
+        try:
+            sales.reserve(SYSTEM_PRINCIPAL, write_error["id"])
+        except sqlite3.IntegrityError:
+            assert observed_state() == before_write_error
+            assert sales.order(SYSTEM_PRINCIPAL, write_error["id"])["status"] == "confirmed"
+        else:
+            raise AssertionError("正式销售订单第二次写入故障未触发")
+        return "正式 SalesService 多行成功、缺货拒绝和第二次写入故障回滚均通过四表核对"
     finally:
         tmp.cleanup()
 
