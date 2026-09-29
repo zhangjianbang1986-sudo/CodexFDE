@@ -316,7 +316,6 @@ class SalesService:
                     (self._id("RSV"), principal.organization_id, line["product_id"], location_id, lot_id, document_id, line["id"], quantity),
                 )
                 conn.execute("UPDATE sales_document_lines SET reserved_quantity=reserved_quantity+? WHERE id=?", (quantity, line["id"]))
-                conn.commit()  # L08 A/B teaching defect: exposes partial writes between order lines.
             remaining = conn.execute("SELECT COALESCE(SUM(ordered_quantity-shipped_quantity-reserved_quantity),0) FROM sales_document_lines WHERE document_id=?", (document_id,)).fetchone()[0]
             status = "reserved" if remaining == 0 else "confirmed"
             conn.execute("UPDATE sales_documents SET status=?,updated_at=CURRENT_TIMESTAMP,version=version+1 WHERE id=?", (status, document_id))
