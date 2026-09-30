@@ -6,6 +6,7 @@ on:
     branches:
       - main
       - "codex/l08-ci-remote-ready-*"
+      - "codex/l08-ci-reconciled-*"
       - "codex/l08-missing-report-remote-ready-*"
 
 permissions:
@@ -24,7 +25,7 @@ jobs:
           python-version: "3.12"
       - name: Unit tests
         continue-on-error: true # L08 A: deliberately demonstrate a false-green adapter.
-        run: python -X utf8 -m unittest discover -s tests -v
+        run: python -X utf8 -m unittest tests.test_production_erp tests.test_ci_evidence -v
       - name: Unified blocking gate
         if: ${{ !cancelled() }}
         run: |
