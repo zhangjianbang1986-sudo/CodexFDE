@@ -24,13 +24,12 @@ jobs:
         with:
           python-version: "3.12"
       - name: Unit tests
-        continue-on-error: true # L08 A: deliberately demonstrate a false-green adapter.
         run: python -X utf8 -m unittest tests.test_production_erp tests.test_ci_evidence -v
       - name: Unified blocking gate
         if: ${{ !cancelled() }}
         run: |
           mkdir -p "$REPORT_DIR"
-          python -X utf8 -m eval.harness --suite blocking --report-path "$REPORT_DIR/harness-blocking.json" || true
+          python -X utf8 -m eval.harness --suite blocking --report-path "$REPORT_DIR/harness-blocking.json"
       - name: Bind Evidence Envelope to this run
         if: always()
         run: python -X utf8 -m workbench.ci_evidence --report "$REPORT_DIR/harness-blocking.json" --output "$REPORT_DIR/ci-evidence.json"
